@@ -190,3 +190,93 @@
       (required-collateral (* loan-amount (var-get minimum-collateral-ratio)))
       (loan-id (+ (var-get total-loans-issued) u1))
     )
+    (begin
+      (asserts! (var-get platform-initialized) ERR-NOT-INITIALIZED)
+      (asserts! (>= collateral-value required-collateral)
+        ERR-INSUFFICIENT-COLLATERAL
+      )
+
+      (map-set loans { loan-id: loan-id } {
+        borrower: tx-sender,
+        collateral-amount: collateral,
+        loan-amount: loan-amount,
+        interest-rate: u5, ;; Static: 5%
+        start-height: stacks-block-height,
+        last-interest-calc: stacks-block-height,
+        status: "active",
+      })
+
+      (match (map-get? user-loans { user: tx-sender })
+        existing-loans (map-set user-loans { user: tx-sender } { active-loans: (unwrap!
+          (as-max-len? (append (get active-loans existing-loans) loan-id) u10)
+          ERR-INVALID-AMOUNT
+        ) }
+        )
+        (map-set user-loans { user: tx-sender } { active-loans: (list loan-id) })
+      )
+
+      (var-set total-loans-issued (+ (var-get total-loans-issued) u1))
+      (ok loan-id)
+    )
+  )
+)
+
+;; Loan Repayment
+(define-public (repay-loan
+    (loan-id uint)
+    (amount uint)
+  )
+  (begin
+    (asserts! (validate-loan-id loan-id) ERR-INVALID-LOAN-ID)
+
+    (let (
+        (loan (unwrap! (map-get? loans { loan-id: loan-id }) ERR-LOAN-NOT-FOUND))
+        (interest-owed (calculate-interest (get loan-amount loan) (get interest-rate loan)
+          (- stacks-block-height (get last-interest-calc loan))
+        ))
+        (total-owed (+ (get loan-amount loan) interest-owed))
+      )
+      (begin
+        (asserts! (is-eq (get status loan) "active") ERR-LOAN-NOT-ACTIVE)
+        (asserts! (is-eq (get borrower loan) tx-sender) ERR-NOT-AUTHORIZED)
+        (asserts! (>= amount total-owed) ERR-INVALID-AMOUNT)
+
+        (map-set loans { loan-id: loan-id }
+          (merge loan {
+            status: "repaid",
+            last-interest-calc: stacks-block-height,
+          })
+        )
+
+        (var-set total-btc-locked
+          (- (var-get total-btc-locked) (get collateral-amount loan))
+        )
+
+        (match (map-get? user-loans { user: tx-sender })
+          existing-loans (ok (map-set user-loans { user: tx-sender } { active-loans: (filter not-equal-loan-id (get active-loans existing-loans)) }))
+          (ok false)
+        )
+      )
+    )
+  )
+)
+
+;;                     Governance / Admin Functions
+
+(define-public (update-collateral-ratio (new-ratio uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (>= new-ratio u110) ERR-INVALID-AMOUNT)
+    (var-set minimum-collateral-ratio new-ratio)
+    (ok true)
+  )
+)
+
+(define-public (update-liquidation-threshold (new-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (>= new-threshold u110) ERR-INVALID-AMOUNT)
+    (var-set liquidation-threshold new-threshold)
+    (ok true)
+  )
+)
